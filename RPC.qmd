@@ -1,0 +1,719 @@
+---
+title: "RPC"
+format: html
+editor: visual
+---
+
+# Explorer et analyser les données du Registre de Preuve de Covoiturage 🚗
+
+Trajets réalisés en covoiturage - Registre de Preuve de Covoiturage <https://www.data.gouv.fr/fr/datasets/trajets-realises-en-covoiturage-registre-de-preuve-de-covoiturage/>
+
+### Librairies nécessaires 📚
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse) # Pour la manipulation de données
+library(sf) # Pour l'analyse spatiale
+library(mapsf) # Pour la cartographie
+library(lubridate) # Pour la gestion des données temporelles
+library(httr) # Pour utiliser des URL
+library(wesanderson) # Pour plus de palettes de couleurs
+library(scales) # Pour la gestion des axes
+library(FactoMineR) # Pour l'analyse statistique
+library(mapsf) # Pour la cartographie thématique
+```
+
+# Préparation des données ⚙️
+
+Les jeux de données disponibles en opendata ne sont pas des données prêtes à l'emploi, elles nécessitent quelques étapes de de **structuration** , de **nettoyage**, et **d'enrichissement** pour être analyser.
+
+## Fusion des dataframes mensuels par année
+
+### Chargement des dataframes mensuels
+
+#### Méthode 1 : Chargement du csv en local
+
+```{r}
+RPC <- read.csv("C:/Users/mericskay_b/Desktop/R/RPC/RPC.csv")
+```
+
+#### Méthode 1 : Chargement du csv via une URL
+
+```{r}
+# URL du fichier CSV
+url <- "https://static.data.gouv.fr/resources/trajets-realises-en-covoiturage-registre-de-preuve-de-covoiturage/20240608-021545/2024-05.csv"
+
+# Nom du fichier local temporaire
+temp_file <- tempfile(fileext = ".csv")
+
+# Télécharger le fichier CSV
+download.file(url, temp_file, method = "auto")
+
+# Lire le fichier CSV dans un dataframe en spécifiant le séparateur
+df <- read.csv(temp_file, sep = ";")
+
+# Supprimer le fichier temporaire
+unlink(temp_file)
+```
+
+### Fusionner les différents dataframes
+
+```{r}
+RPC2024 <- rbind(df1, df2, df3...)
+```
+
+## Nettoyage des données
+
+### Suppression des doublons
+
+```{r}
+RPC <- RPC2022a %>% distinct(RPC2022a$trip_id, .keep_all= TRUE)
+```
+
+### Garder et renommer les colonnes utiles
+
+```{r}
+RPC <- RPC %>% select(timestamp = journey_start_datetime, 
+                          nomvilleO = journey_start_town,
+                          nomvilleD = journey_end_town,
+                          villeO= journey_start_insee,
+                          villeD=journey_end_insee, 
+                          departementO=journey_start_department, 
+                          departementD=journey_end_department,
+                          epciO=journey_start_towngroup,
+                          epciD=journey_end_towngroup,
+                          latO = journey_start_lat, 
+                          longO = journey_start_lon, 
+                          latD = journey_end_lat, 
+                          longD = journey_end_lon, 
+                          distance= journey_distance,
+                          duree=journey_duration,
+                          incitation = has_incentive)
+
+RPC$distance <- as.numeric(RPC$distance)
+RPC$duree <- as.numeric(RPC$duree)
+```
+
+### Supprimer les valeurs extremes de distance et de durée de trajets
+
+```{r}
+RPC <- RPC %>% filter(distance<150000)
+RPC <- RPC %>% filter(distance>2000)
+RPC <- RPC %>% filter(duree>10)
+RPC <- RPC %>% filter(duree<120)
+```
+
+### Supprimer les charactères inutiles
+
+```{r}
+RPC$nomvilleO <- gsub("\\([^()]*\\)", "", RPC$nomvilleO, perl = TRUE)
+RPC$nomvilleD <- gsub("\\([^()]*\\)", "", RPC$nomvilleD, perl = TRUE)
+```
+
+## Enrichissement des données
+
+### Ajouter des informations temporelles
+
+```{r}
+RPC$timestamp <- as_datetime(RPC$timestamp)
+RPC <- RPC %>% mutate(date= date(timestamp))
+
+RPC <- RPC %>% mutate(journee= wday(timestamp,label= TRUE, abbr= FALSE))
+RPC <- RPC %>% mutate(mois= month(timestamp,label= TRUE, abbr= FALSE))
+RPC <- RPC %>% mutate(heure= hour(timestamp))
+RPC <- RPC %>% mutate(annee= year(timestamp))
+RPC <- RPC %>% mutate(jour = (day(RPC$timestamp)), wotm= ceiling(day(RPC$timestamp) / 7))
+
+RPC <- RPC %>% na.omit
+```
+
+### Ajouter les informations territoriales
+
+#### Importer la couche des EPCI de France (Admin Express IGN) et la reprojeter
+
+```{r}
+France <- st_read(dsn = "E:/AdminExpress/CommunesFrance.shp", stringsAsFactors = FALSE) 
+France <- as.data.frame(France)
+
+```
+
+#### Ajouter la population et le code des EPCI des communes d'origine et de destination
+
+```{r}
+#Faire les deux jointures
+RPC2 <- merge(RPC, France[, c("INSEE_COM", "POPULATION", "SIREN_EPCI")], 
+              by.x = "villeO", by.y = "INSEE_COM")
+
+RPC3 <- merge(RPC2, France[, c("INSEE_COM", "POPULATION", "SIREN_EPCI")], 
+              by.x = "villeD", by.y = "INSEE_COM")
+
+#Renommer correctement les champs
+RPC3 <- RPC3 %>% rename("codeepciO" = "SIREN_EPCI.x")
+RPC3 <- RPC3 %>% rename("codeepciD" = "SIREN_EPCI.y")
+RPC3 <- RPC3 %>% rename("populationO" = "POPULATION.x")
+RPC3 <- RPC3 %>% rename("populationD" = "POPULATION.y")
+```
+
+### Ajouter le type d'EPCI d'origine et de destination
+
+```{r}
+EPCI <- st_read(dsn = "E:/AdminExpress/EPCI.shp", stringsAsFactors = FALSE)
+EPCI <- as.data.frame(EPCI)
+
+RPCEPCI1 <- merge(RPC3, EPCI[, c("CODE_SIREN", "NATURE")], by.x = "codeepciO", by.y = "CODE_SIREN")
+RPCEPCI1 <- RPCEPCI1 %>% rename("TypeepciO" = "NATURE")
+
+RPCEPCI2 <- merge(RPCEPCI1, EPCI[, c("CODE_SIREN", "NATURE")], by.x = "codeepciD", by.y = "CODE_SIREN")
+RPC <- RPCEPCI2 %>% rename("TypeepciD" = "NATURE")
+```
+
+### Structuration de la table finale
+
+```{r}
+RPC <- RPC %>% na.omit
+RPC <- RPC %>% select(timestamp, 
+                       nomvilleO, nomvilleD,
+                       villeO, villeD, 
+                       populationO, populationD,
+                       departementO, departementD, 
+                       epciO, epciD, TypeepciO, TypeepciD,
+                       codeepciO, codeepciD,
+                       latO, longO, latD, longD, 
+                       distance, duree, incitation,
+                       date, journee, mois, heure, annee, jour, wotm)
+```
+
+### Extraction en fonction des zones d'étude
+
+```{r}
+
+RPC_ARA <- RPC %>% filter(departementO %in% c("01", "03", "07", "15", "26", "38", "42", "43", "63", "69", "73", "74"))
+
+RPC_PDL <- RPC %>% filter(departementO %in% c("44", "49", "53", "72", "84"))
+```
+
+# Explorations graphique (temporalités)
+
+```{r}
+RPC <- RPC %>% filter(annee !="2021")
+```
+
+### Nombre de trajets par jour
+
+```{r}
+AgregDate <- RPC %>% group_by(date) %>% summarise(nb= n())
+AgregDate$date <- as.Date(AgregDate$date, format = "%Y-%m-%d")
+
+ggplot(AgregDate) + 
+    geom_col(aes(x = date, y = nb), color="darkblue", fill="darkblue") + 
+    theme_minimal() + 
+    labs(x = "Date", 
+         y = "Nb de trajets par jour", 
+         caption = "Source : RPC") +
+    scale_x_date(labels = date_format("%Y"))
+```
+
+### Nombre de trajets par heure
+
+```{r}
+AgregHeure <- RPC %>% group_by(heure) %>% summarise (nb= n())
+
+ggplot(AgregHeure, aes(x=heure, y=nb)) + 
+    geom_bar(stat="identity", color = "black", fill = "coral") +
+    theme_minimal() + 
+    labs(x = "Heure", y = "Nb de trajets", title = "Nombre de trajets par heure de la journée") +
+  theme(axis.text.x = element_text(face = "bold")) +
+    labs(caption="Source : RPC")
+```
+
+### Nombre de trajets par journée
+
+```{r}
+AgregJournee <- RPC %>% group_by(journee) %>% summarise (nb= n())
+
+AgregJournee$journee <- factor(AgregJournee$journee,levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+
+ggplot(AgregJournee, aes(x=journee, y=nb)) + 
+geom_bar(stat="identity", width=0.8, position=position_dodge(width=0.8), color = "black", fill = "orange")+
+  theme_minimal() +
+    theme(axis.text.x = element_text(face = "bold")) +
+    labs(x = "Journée", y = "Nb de trajets", title = "Nombre de trajets par jour de la semaine") +
+    labs(caption="Source : RPC")
+```
+
+### Nombre de trajets par mois
+
+```{r}
+RPC2 <- RPC %>% filter( ! annee == 2024)
+AgregMois <- RPC2 %>% group_by(mois) %>% summarise (nb= n())
+
+AgregMois$mois <- factor(AgregMois$mois,levels = c("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"))
+
+
+ggplot(AgregMois, aes(x=mois, y=nb)) + 
+geom_bar(stat="identity", width=0.7, position=position_dodge(width=0.8), color = "black", fill = "lightcoral") +
+  theme_minimal() +
+      theme(axis.text.x = element_text(face = "bold")) +
+   labs(y = "Nb de trajets", title = "Nombre de trajets par mois") +
+   labs(caption="Source : RPC")
+```
+
+### Nombre de trajets par jour, mois et année
+
+```{r}
+agregsemainemois <- RPC %>% group_by(annee, mois, journee) %>% summarise(Nb=n())
+
+agregsemainemois$journee <- factor(agregsemainemois$journee,levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+
+agregsemainemois$mois <- factor(agregsemainemois$mois,levels = c("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"))
+
+ggplot(agregsemainemois) + geom_col(aes(x = journee, y = Nb, fill=mois)) + 
+scale_fill_brewer(palette="Paired") + 
+theme_bw() + 
+theme(legend.position = "none", axis.text.x = element_text(angle = 90)) +
+facet_grid(annee~mois)
+```
+
+### Nombre de trajets par mois et année
+
+```{r}
+RPC3 <- RPC_ARA %>% filter(! annee == 2021 )
+agregmoisannee <- RPC3 %>% 
+  group_by(mois, annee, incitation) %>% 
+  summarise(Nb = n(), .groups = 'drop')
+
+# Convertir la colonne 'mois' en facteur avec les niveaux ordonnés
+agregmoisannee$mois <- factor(agregmoisannee$mois, levels = c("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"))
+
+agregmoisannee$incitation <- factor(agregmoisannee$incitation, levels = c("OUI", "NON"))
+
+# Création du graphique
+ggplot(agregmoisannee) + 
+  geom_col(aes(x = mois, y = Nb, fill = incitation)) + 
+  scale_fill_brewer(palette = "Set2") + 
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  facet_wrap(~ annee) + 
+  labs(
+    x = "Mois", 
+    y = "Nombre de trajets", 
+    title = "Nombre de trajets par mois et par année",
+    fill = "Incitation"
+  )
+```
+
+### Nombre de trajets par jour
+
+```{r}
+agregmoisepci <- RPC %>% 
+  group_by(mois, TypeepciO) %>% 
+  summarise(Nb = n(), .groups = 'drop')
+
+# Convertir la colonne 'mois' en facteur avec les niveaux ordonnés
+agregmoisepci$mois <- factor(agregmoisepci$mois, levels = c("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"))
+
+# Création du graphique
+ggplot(agregmoisepci) + 
+  geom_col(aes(x = mois, y = Nb, fill = TypeepciO)) + 
+  scale_fill_brewer(palette = "Set2") + 
+  theme_bw() + 
+  theme(
+    legend.position = "none", 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  facet_wrap(~ TypeepciO) + 
+  labs(
+    x = "Mois", 
+    y = "Nombre de trajets", 
+    title = "Nombre de trajets par mois et par année",
+    fill = "Année"
+  )
+```
+
+```{r}
+agregheurepci <- RPC %>% 
+  group_by(heure, TypeepciO) %>% 
+  summarise(Nb = n(), .groups = 'drop')
+
+# Création du graphique
+ggplot(agregheurepci) + 
+  geom_col(aes(x = heure, y = Nb, fill = TypeepciO)) + 
+  scale_fill_brewer(palette = "Set2") + 
+  theme_bw() + 
+  theme(
+    legend.position = "none", 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  facet_wrap(~ TypeepciO) + 
+  labs(
+    x = "Mois", 
+    y = "Nombre de trajets", 
+    title = "Nombre de trajets par mois et par année",
+    fill = "Année"
+  )
+```
+
+```{r}
+agregheurejour <- RPC %>% group_by(heure, journee) %>% summarise(Nb=n())
+
+agregheurejour$journee <- factor(agregheurejour$journee,levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+
+ggplot(agregheurejour) + geom_col(aes(x = heure, y = Nb, fill=journee)) + 
+scale_fill_brewer(palette="Set2") + 
+theme_bw() + 
+theme(legend.position = "none", axis.text.x = element_text(angle = 45)) +
+   labs(
+    y = "Nombre de trajets", 
+    title = "Nombre de trajets par heure et par journée",
+    fill = "Année"
+  ) +
+facet_wrap(~journee)
+```
+
+```{r}
+agregjourepci <- RPC %>% group_by(TypeepciO, journee) %>% summarise(Nb=n())
+
+agregjourepci$journee <- factor(agregjourepci$journee,levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+
+ggplot(agregjourepci) + geom_col(aes(x = journee, y = Nb, fill=TypeepciO)) + 
+scale_fill_brewer(palette="Set2") + 
+theme_bw() + 
+theme(legend.position = "none", axis.text.x = element_text(angle = 45)) +
+facet_wrap(~TypeepciO)
+```
+
+### Heatmap par jour et par mois
+
+```{r}
+heatmap <- RPC2 %>% group_by(journee, mois) %>% summarise(nb=n())
+heatmap$journee <- factor(heatmap$journee,levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+heatmap$mois <- factor(heatmap$mois, levels = c("décembre", "novembre", "octobre", "septembre", "août", "juillet", "juin", "mai", "avril", "mars", "février", "janvier"))
+
+pal <- wes_palette("Zissou1", 21, type = "continuous")
+
+ggplot(heatmap, aes(journee, mois, fill = nb)) + 
+  geom_tile(colour = "white") + 
+  labs(fill = "Nombre de trajets") +
+    scale_fill_gradientn(colours = pal, labels = scales::number_format(accuracy = 1)) + 
+  xlab("Journée") +
+  ylab("Mois") + 
+  labs(caption = "Source : RPC") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(face = "bold"), 
+        axis.text.y = element_text(face = "bold")) 
+```
+
+### Heatmap par jour et par heure
+
+```{r}
+heatmap <- RPC %>% group_by(journee, heure) %>% summarise(nb=n())
+
+heatmap$journee <- factor(heatmap$journee,levels = c("dimanche", "samedi", "vendredi", "jeudi", "mercredi", "mardi", "lundi"))
+
+
+pal <- wes_palette("Zissou1", 21, type = "continuous")
+
+ggplot(heatmap, aes(heure, journee, fill = nb)) + geom_tile(colour = "white") + 
+    scale_fill_gradientn(colours = pal, labels = scales::number_format(accuracy = 1)) + 
+      labs(fill = "Nombre de trajets") +
+      xlab("Heure de la journée") +
+      ylab("Journée") + 
+      labs(caption="Source : RPC") + 
+      theme_bw() +
+      theme(axis.text.x = element_text(face = "bold"), 
+        axis.text.y = element_text(face = "bold")) 
+```
+
+### Historgamme des distances des trajets
+
+```{r}
+my_breaks <- hist(RPC$distance,breaks=100)$breaks   
+
+# Calcul de la moyenne et de la médiane
+mean_distance <- mean(RPC$distance, na.rm = TRUE)
+median_distance <- median(RPC$distance, na.rm = TRUE)
+
+# Créer l'histogramme
+hist(RPC$distance,                           
+     breaks = my_breaks,
+     main = "",
+     xlab = "Distance (en mètres)",
+     ylab = "Nb de trajets",
+     col = "mediumaquamarine")
+
+# Ajouter la ligne de la moyenne
+abline(v = mean_distance, col = "black", lwd = 2, lty = 2) # Ligne bleue en tirets
+
+# Ajouter la ligne de la médiane
+abline(v = median_distance, col = "blue", lwd = 2, lty = 3) # Ligne rouge en pointillés
+
+# Ajouter une légende pour clarifier
+legend("topright", legend = c("Moyenne", "Médiane"), col = c("black", "blue"), lwd = 2, lty = c(2, 3))
+```
+
+### Histogramme des durées des trajets
+
+```{r}
+my_breaks <- hist(RPC$duree,breaks=100)$breaks   
+
+# Calcul de la moyenne et de la médiane
+mean_distance <- mean(RPC$duree, na.rm = TRUE)
+median_distance <- median(RPC$duree, na.rm = TRUE)
+
+# Créer l'histogramme
+hist(RPC$duree,                           
+     breaks = my_breaks,
+     main = "",
+     xlab = "Durée (en minutes)",
+     ylab = "Nb de trajets",
+     col = "lightcoral")
+
+# Ajouter la ligne de la moyenne
+abline(v = mean_distance, col = "black", lwd = 2, lty = 2) # Ligne bleue en tirets
+
+# Ajouter la ligne de la médiane
+abline(v = median_distance, col = "blue", lwd = 2, lty = 3) # Ligne rouge en pointillés
+
+# Ajouter une légende pour clarifier
+legend("topright", legend = c("Moyenne", "Médiane"), col = c("black", "blue"), lwd = 2, lty = c(2, 3))
+```
+
+### Population et nombre de trajets (Origine)
+
+```{r}
+agregnbpop <- RPC_ARA %>% group_by(nomvilleO, populationO) %>% summarise(nb=n())
+
+ggplot(agregnbpop, aes(x = populationO, y = nb)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +  
+  labs(title = "Relation entre la population des villes de départ et le nombre de trajets",
+       x = "Population",
+       y = "Nombre de trajets") +
+  theme_minimal() +
+  geom_text(data = subset(agregnbpop, nb > 15000 | populationO > 100000), 
+            aes(label = nomvilleO), 
+            vjust = -1)
+```
+
+### Population et nombre de trajets (Destination)
+
+```{r}
+agregnbpop <- RPC_ARA %>% group_by(nomvilleD, populationD) %>% summarise(nb=n())
+
+ggplot(agregnbpop, aes(x = populationD, y = nb)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +  
+  labs(title = "Relation entre la population des villes de destination et le nombre de trajets",
+       x = "Population",
+       y = "Nombre de trajets") +
+  theme_minimal() +
+  geom_text(data = subset(agregnbpop, nb > 15000 | populationD > 100000), 
+            aes(label = nomvilleD), 
+            vjust = -1)
+```
+
+### Incitation
+
+```{r}
+incitARA <- RPC_ARA %>% group_by(incitation) %>% summarise(nb =n())
+
+incitationcommune <- RPC_ARA %>%
+  group_by(nomvilleO) %>%
+  summarise(nbtrajets = n(), 
+            partincitation = sum(incitation == "OUI")/n()*100)
+```
+
+### Offre de trajet et incications
+
+```{r}
+
+ggplot(incitationcommune, aes(x = partincitation, y = nbtrajets)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +  
+  labs(title = "Relation entre la population des villes de départ et le nombre de trajets",
+       x = "Incitation",
+       y = "Nbtrajets") +
+  theme_minimal() 
+  geom_text(data = subset(incitationcommune, nbtrajets>10000), 
+            aes(label = nomvilleO), 
+            vjust = -1)
+```
+
+# Agrégation spatiale
+
+### Chargement data ARA
+
+```{r}
+RPC_ARA <- read.csv("C:/Users/mericskay_b/Desktop/R/RPC/RPC_ARA.csv")
+```
+
+### Département
+
+```{r}
+REPC_DEP <- RPC_ARA %>% group_by(departementO, departementD) %>% summarise(nb = n())
+```
+
+```{r}
+DEPO <- RPC_ARA %>% group_by(departementO) %>% summarise(nb = n())
+
+DEPD <- RPC_ARA %>% group_by(departementD) %>% summarise(nb = n())
+```
+
+### EPCI
+
+```{r}
+
+EPCIagreg <- RPC_ARA %>% group_by(epcicodeO, epcicodeD, departementO, departementD) %>% summarise(nb=n())
+
+EPCI <- st_read(dsn = "E:/AdminExpress/EPCI.shp", stringsAsFactors = FALSE) 
+EPCI <- st_transform (EPCI, 4326)
+EPCI <- st_centroid(EPCI)
+EPCI <- EPCI %>% mutate(lon = sf::st_coordinates(.)[,1],
+                        lat = sf::st_coordinates(.)[,2])
+EPCI$lon <- round(EPCI$lon,3)
+EPCI$lat <- round(EPCI$lat,3)
+
+
+EPCIagreggeo <- merge(EPCIagreg, EPCI, by.x = "epcicodeO", by.y = "CODE_SIREN")
+EPCIagreggeo2 <- merge(EPCIagreggeo, EPCI, by.x = "epcicodeD", by.y = "CODE_SIREN")
+
+EPCIOK <- EPCIagreggeo2 %>% select(epciO= NOM.x, epciD=NOM.y, type = NATURE.x, departementO, departementD, nb, LatO=lat.x, LongO= lon.x, LatD= lat.y, LongD= lon.y)
+```
+
+```{r}
+write_csv(EPCIOK, 'C:/Users/mericskay_b/Desktop/EPCIRPC.csv')
+```
+
+### Communes
+
+```{r}
+
+NBtrajets <- RPC_ARA %>% group_by(nomvilleO, epciO, TypeepciO) %>% summarise( nb = n())
+```
+
+```{r}
+
+Communnesagreg <- RPC %>% group_by(villeO, villeD) %>% summarise(nb=n())
+Communes <- st_read(dsn = "E:/AdminExpress/CommunesFrance.shp", stringsAsFactors = FALSE) 
+Communes <- st_transform (Communes, 4326)
+Communes <- st_centroid(Communes)
+Communes <- Communes %>% mutate(lon = sf::st_coordinates(.)[,1],
+                lat = sf::st_coordinates(.)[,2])
+Communes$lon <- round(Communes$lon,3)
+Communes$lat <- round(Communes$lat,3)
+Communesagreggeo <- merge(Communnesagreg, Communes, by.x = "villeO", by.y = "INSEE_COM")
+Communesagreggeo2 <- merge(Communesagreggeo, Communes, by.x = "villeD", by.y = "INSEE_COM")
+CommunesOK <- Communesagreggeo2 %>% select(CommunesO= NOM.x, CommunesD=NOM.y, nb,  LatO=lat.x, LongO= lon.x, LatD= lat.y, LongD= lon.y)
+```
+
+```{r}
+write_csv(CommunesOK, 'C:/Users/mericskay_b/Desktop/CommunesRPC.csv')
+```
+
+## CAH
+
+### Préparation du jeu de données
+
+```{r}
+population_totale <- RPC_ARA %>%
+  distinct(codeepciO, villeO, .keep_all = TRUE) %>%  # Supprimer les doublons de commune
+  group_by(codeepciO) %>%
+  summarise(pop = sum(populationO))
+```
+
+```{r}
+
+RPCCAH <- RPC_ARA %>% group_by(codeepciO) %>% 
+  summarise(nbtrajets = n(), 
+            distance = mean(distance), 
+            nbcommune = n_distinct(villeO),
+            partincitation = sum(incitation == "OUI")/n()*100)
+
+
+RPCCAH <- merge(RPCCAH, population_totale, by= "codeepciO")
+
+EPCICAH <- RPCCAH %>% na.omit()  
+
+CAHdf <- EPCICAH %>% select(pop, nbtrajets, distance, partincitation)
+```
+
+### Variables centrées-réduites
+
+```{r}
+CAH <- scale(CAHdf)
+```
+
+### Réaliser l'ACP
+
+```{r}
+pca_result <- PCA(CAH, graph = TRUE)
+```
+
+### Réalisez une CAH sur les composantes principales (CP)
+
+```{r}
+cah_result <- hclust(dist(CAH))  
+clusters <- cutree(cah_result, k = 5)  
+RPCCAH$Cluster <- clusters
+```
+
+### Tableau recapitulatif des groupes
+
+```{r}
+RecapCAHEPCI <- RPCCAH %>% group_by(Cluster) %>% 
+  summarise(NbEPCI= n(), 
+            Pop = mean(pop), 
+            Distance = mean(distance), 
+            nbtrajets = mean(nbtrajets),
+            partincitation = mean(partincitation)) 
+```
+
+### Cartographie de la CAH
+
+```{r}
+EPCI <- EPCI %>% rename("codeepciO" = "CODE_SIREN" )
+
+EPCI2 <- merge(EPCI, RPCCAH, by = "codeepciO")  
+
+EPCI2 <- st_as_sf(EPCI2)
+
+mf_theme("default")  
+
+mf_map(   x = EPCI2,   var = "Cluster",   type = "typo",   
+          pal = c("#39a699","#f9c155","#FF851B","#416979", "#FF4136"), 
+          val_order = c("1","2","3", "4", "5"), 
+          border = "grey",   lwd = 0.01,   
+          leg_pos = "topright",   
+          leg_title = "Typologie des EPCI" )  
+
+mf_layout(title = "Typologie des EPCI", 
+          credits = paste0("Sources: RPC / IGN"))
+
+```
+
+### Commune
+
+```{r}
+CommunesRPC <- RPC_ARA %>% group_by(villeO) %>% 
+  summarise(nbtrajet = n(),
+            partincitation = sum(incitation == "OUI")/n()*100)
+
+France <- France %>% rename(villeO = INSEE_COM)
+
+Communesgeo <- merge(France, CommunesRPC, by = "villeO")  
+Communesgeo<- st_transform(Communesgeo, 4326)
+
+st_write(Communesgeo, 'Communesgeo.geojson', append=TRUE)
+```
+
+### EPCI
+
+```{r}
+EPCIRPC <- RPC_ARA %>% group_by(codeepciO) %>% 
+  summarise(nbtrajet = n(),
+            partincitation = sum(incitation == "OUI")/n()*100)
+
+EPCIgeo <- merge(EPCI, EPCIRPC, by = "codeepciO")  
+st_write(EPCIgeo, 'EPCIgeook.geojson', append=TRUE)
+```
